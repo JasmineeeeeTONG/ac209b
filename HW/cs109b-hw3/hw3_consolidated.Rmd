@@ -1,0 +1,948 @@
+---
+title: "| Homework 3: Bayesian Analysis"
+header-includes:
+  - \usepackage{graphicx}
+  - \usepackage{enumerate}
+  - \usepackage{verbatim}
+  - \usepackage{amsmath}
+  - \usepackage{subfigure}
+  - \usepackage{parskip}
+  - \usepackage[notextcomp]{kpfonts}
+  - \usepackage{geometry}
+  - \usepackage[T1]{fontenc}
+  - \usepackage{inconsolata}
+  - \usepackage[dvipsnames]{xcolor}
+  - \DeclareMathOperator*{\argmin}{argmin}
+
+output:
+  pdf_document:
+  html_document:
+    highlight: tango
+    theme: flatly
+date: "Feb 20, 2018"
+subtitle: Harvard CS 109B, Spring 2018
+---
+\newcommand{\blue}{\textcolor{blue}}
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Homework 3 is due March 5, 2018 11:59 PM
+
+
+$$
+\LARGE
+\textbf{LDA \& Bayes}
+$$
+
+In the first part of this assignment, you will be working with text 
+from \@realDonaldTrump Twitter. 
+The text was taken from all tweets Donald Trump sent 
+between 01/19/2016 and 01/19/2018. 
+The goal is to use Latent Dirichlet Allocation in order to model the 
+topics that the president tweeted about during this time. 
+
+In the second part of this assignment, you are provided with 
+data sets *dataset-2-train.txt* and  *dataset-2-test.txt*
+containing details of contraceptive usage by 1934 Bangladeshi women. 
+There are four attributes for each woman, along with a label indicating 
+if she uses contraceptives. 
+The attributes include: 
+
+ - district: identifying code for the district the woman lives in 
+ - urban: type of region of residence
+ - living.children: number of living children
+ - age-mean: age of women (in years, centred around mean)
+
+The women are grouped into 60 districts. 
+The task is to build a classification model that can predict if a 
+given woman uses contraceptives. 
+
+## 1. Data Preparation
+The tweet data is provided for you as ``trump-tibble.csv``. After you read the data into R, you'll see that there are only two columns: document and text. The *document* column contains the date and time of the tweet, and the *text* column contains the actual text of the tweet. Before you begin, you'll want to cast the columns as characters rather than factors. You can do this with the following code: 
+```{r}
+# read in trump tibble data
+trump_tibble = read.csv("data/trump_tibble.csv")
+# cast factors to characters
+trump_tibble$document <- as.character(trump_tibble$document)
+trump_tibble$text <- as.character(trump_tibble$text)
+```
+
+The following libraries will be of use for this problem: 
+```{r}
+# load libraries
+library(topicmodels) #topic modeling functions
+library(stringr) #common string functions
+library(tidytext) #tidy text analysis
+suppressMessages(library(tidyverse)) #data manipulation and visualization
+#messages give R markdown compile error so we need to suppress it
+
+## Source topicmodels2LDAvis & optimal_k functions
+invisible(lapply(file.path("https://raw.githubusercontent.com/trinker/topicmodels_learning/master/functions",
+c("topicmodels2LDAvis.R", "optimal_k.R")),
+devtools::source_url))
+```
+
+(a) Use the ``unnest-tokens`` function to extract words 
+from the tweets text
+
+```{r}
+trump_tibble_extracted <- trump_tibble %>% unnest_tokens(word, text)
+head(trump_tibble_extracted)
+```
+
+(b) Create a dataframe consisting of the document-word counts 
+
+```{r}
+trump_word_counts <- trump_tibble_extracted %>%
+  anti_join(stop_words) %>%
+  count(document, word, sort = TRUE) %>%
+  ungroup()
+```
+
+(c) Create a document-term matrix using the ``cast-dtm`` function 
+
+```{r}
+trump_dtm <- trump_word_counts %>%
+  cast_dtm(document, word, n)
+trump_dtm
+```
+
+## 2. LDA
+
+(a) Using the following control parameters, run the optimal-k function to search for the optimal number of topics. Be sure to set the "max.k" parameter equal to 30. 
+
+```{r}
+control <- list(burnin = 500, iter = 1000, keep = 100, seed = 46)
+lda.opt.k <- optimal_k(trump_dtm, max.k=30, control=control, drop.seed=FALSE)
+```
+
+
+(b) Plot the results of the optimal-k function. What does this plot suggest about the number of topics in the text? 
+
+```{r}
+plot(lda.opt.k)
+```
+\blue{\textbf{ANSWER (2. LDA (b)):} \newline
+The plot above suggests that there are `r summary(lda.opt.k)[[1]]` topics in the text.
+}
+
+
+(c) Run LDA on the document-term matrix using the optimal value of k. 
+Print out the top 10 words for each of the k topics. 
+Comment on the results and their plausibility. 
+
+```{r 2c_lda }
+trump_lda = LDA(trump_dtm, k = as.numeric(lda.opt.k), 
+                   method="Gibbs", control=control)
+lda_inf = posterior(trump_lda)
+topics.trump = topics(trump_lda,1)
+terms.trump = terms(trump_lda, 10)
+print(terms.trump[,])
+```
+\blue{\textbf{ANSWER (2. LDA (c)):} \newline
+The results are consistent with the assumption that each topic can be viewed as a different distribution of terms. The top 10 words vary by topic. These topics make sense as they reflect well what Trump focused on discussing since he took the political stage.  For instance, topic 1 is concerned with economics including top words as "jobs", "tax", "economy" and "stock"; topic 3 reflects the fact that Trump is rumored to only get his news from Fox News and that Fox News is very Trump-friendly; topic 6 is concerned with his rally speeches including his famous campaign logan "make America great again"; topic 7 reflects his constant bashing of his political opponent Hilary Clinton; topic 8 is more about politics including "republican", "house", and "repeal"; topic 10 is about Eastern Asia relationships including "north", "korea", "china" and "south"; and topic 16 is his "fake news" claim about the major media outlets.
+}
+
+## 3. Bayesian Logistic Regression
+The first model we will fit to the contraceptives data is a 
+varying-intercept logistic regression model, where the intercept 
+varies by district.
+
+Prior distribution:
+
+$\beta_{0j} \sim N(\mu_0, \sigma_0)$, with 
+$\mu_0 \sim N(0, 100)$ and
+$\sigma_0 \sim \mbox{Exponential}(.1)$ 
+
+$\beta_1 \sim N(0, 100)$,
+$\beta_2 \sim N(0, 100)$,
+$\beta_3 \sim N(0, 100)$ 
+
+Model for data:
+ 
+$Y_{ij} \sim Bernoulli(p_{ij})$ 
+
+$logit\;p_{ij} = 
+\beta_{0j} + \beta_1 * urban + 
+\beta_2 * \mbox{living-children}  + \beta_3 * \mbox{age-mean}$ 
+
+
+where $Y_{ij}$ is 1 if woman $i$ in district $j$ uses
+contraception, and 0 otherwise, and where
+$i=1,\ldots,N$ and $j=1,\ldots,J$ 
+($N$ is the number of observations in the data, 
+and $J$ is the number of districts). 
+The above notation assumes $N(\mu,\sigma)$ is a normal distribution
+with mean $\mu$ and standard deviation $\sigma$.
+Also, the above notation assumes $\mbox{Exponential}(\lambda)$
+has mean $1/\lambda$.
+These are consistent with the parameterizations in Stan.
+
+
+After you read the train and test data into R, 
+the following code will help with formatting: 
+```{r 3_data, fig.width = 4, fig.height = 4, message=FALSE}
+# read in data
+train <- read.csv("data/dataset_2_train.txt")
+test <- read.csv("data/dataset_2_test.txt")
+
+# convert everything to numeric 
+for (i in 1:ncol(train)) {
+  train[,i] <- as.numeric(as.character(train[,i]))
+  test[,i] <- as.numeric(as.character(test[,i]))
+}
+
+# map district 61 to 54 (so that districts are in order)
+train_bad_indices <- which(train$district == 61)
+train[train_bad_indices, 1] <- 54
+test_bad_indices <- which(test$district == 61)
+test[test_bad_indices, 1] <- 54
+```
+
+
+(a) 
+To verify the procedure,
+simulate binary response data (using the \verb+rbinom+ function)
+assuming the following parameter values
+(and using the existing features and district information
+from the training data):
+```{r 3a, fig.width = 4, fig.height = 4, message=FALSE}
+library(boot)
+library(dbplyr)
+mu_beta_0 = 2
+sigma_beta_0 = 1
+set.seed(123)  # to ensure the next line is common to everyone
+beta_0 = rnorm(n=60, mean=mu_beta_0, sd=sigma_beta_0)
+beta_1 = 4
+beta_2 = -3
+beta_3 = -2
+
+logit_pij = rep(NA, nrow(train))
+
+# simulate data
+for (i in 1:nrow(train)) {
+  logit_pij[i] = beta_0[train[i,]$district] +
+        beta_1 * train[i,]$urban + 
+        beta_2 * train[i,]$living.children +
+        beta_3 * train[i,]$age_mean
+}
+
+pij = inv.logit(logit_pij)
+
+y_simulated = rbinom(n=nrow(train), size=1, prob=pij)
+```
+
+(b) Fit the varying-intercept model specified above to 
+your simulated data
+
+```{r 3b, fig.width = 4, fig.height = 4, message=FALSE, warning=FALSE}
+library(rstan)
+library(ggplot2)
+library(bayesplot)
+
+theme_set(bayesplot::theme_default())
+
+# create list 
+stan_list3b <- list()
+stan_list3b$Y <- y_simulated
+stan_list3b$N <- length(y_simulated) # number of obs
+stan_list3b$J <- length(unique(train$district)) # number of district
+stan_list3b$district <- train$district
+stan_list3b$urban <- train$urban
+stan_list3b$living_children <- train$living.children
+stan_list3b$age_mean <- train$age_mean
+```
+
+```{r 3b_stan_code, fig.width = 4, fig.height = 4, message=FALSE}
+# stan code 
+stan_code3b <- c("
+data {
+  // Number of observations
+  int N;
+  // Number of districts
+  int J;
+  // List of features, one for each observation
+  int district[N];
+  int<lower=0, upper=1> urban[N];
+  int living_children[N];
+  real age_mean[N];
+  // Binary response (integer array)
+  int<lower=0, upper=1> Y[N];
+}
+
+parameters {
+  real mu_0;
+  real<lower=0> sigma_0;
+  real beta_0j[J]; 
+  real beta_1;
+  real beta_2;
+  real beta_3;
+}
+
+model {
+  // Prior
+  mu_0 ~ normal(0,100);
+  sigma_0 ~ exponential(0.1);
+  beta_1 ~ normal(0,100);
+  beta_2 ~ normal(0,100);
+  beta_3 ~ normal(0,100);
+  
+  // J different beta_0j priors
+  for (j in 1:J) {
+    beta_0j[j] ~ normal(mu_0, sigma_0);
+  }
+  
+  // Likelihood
+  for (n in 1:N) {
+  Y[n] ~ bernoulli_logit(beta_0j[district[n]] + 
+              beta_1*urban[n] + beta_2*living_children[n] + beta_3*age_mean[n]);
+  }
+}
+
+generated quantities {
+  int y_rep[N];         // Draws from posterior predictive dist
+
+  for (n in 1:N) {
+    y_rep[n] = bernoulli_rng(inv_logit(beta_0j[district[n]] + 
+                  beta_1*urban[n] + beta_2*living_children[n] + beta_3*age_mean[n]));
+  }
+}
+
+")
+```
+
+```{r 3b_fit_model, fig.width = 4, fig.height = 4, message=FALSE, warning=FALSE}
+# fit the model 
+options(mc.cores = parallel::detectCores())
+fit3b <- stan(model_code = stan_code3b, 
+            data = stan_list3b, 
+            iter = 2000, 
+            chains = 4, 
+            seed = 46,
+            refresh = FALSE)
+```
+
+(c) Plot the trace plots of the MCMC sampler for the parameters $\mu_{\beta_0}, \sigma_{\beta_0}, \beta_1, \beta_2, \beta_3$. 
+Does it look like the samplers converged?
+
+```{r 3c_convergence, message=FALSE, warning=FALSE}
+plot(fit3b, plotfun="trace", pars='mu_0')
+plot(fit3b, plotfun="trace", pars='sigma_0')
+plot(fit3b, plotfun="trace", pars='beta_1')
+plot(fit3b, plotfun="trace", pars='beta_2')
+plot(fit3b, plotfun="trace", pars='beta_3')
+```
+\blue{\textbf{ANSWER (3. Bayesian Logistic Regression (c)):} \newline
+The plot above suggests that the samples for the parameters (especially $\mu_0$, $\sigma_0$ and $\beta_2$) did not converge very well.
+}
+
+
+(d) Plot histograms of the posterior distributions for the 
+parameters $\beta_{0,10}, \beta_{0,20} .... \beta_{0,60}$. 
+Are the actual parameters that you generated contained within these 
+posterior distributions? 
+
+```{r, plot_beta_0js, message=FALSE, warning=FALSE}
+#color_scheme_set("brightblue") # check out bayesplot::color_scheme_set
+
+for (i in seq(10,60,10)){
+  beta_0j_draws <- as.matrix(fit3b, pars = paste0("beta_0j[", i, "]"))
+  beta_0j_quantile <- quantile(beta_0j_draws, prob=c(0.025, 0.975))
+  print(mcmc_hist(beta_0j_draws, prob = 0.95) +
+          ggplot2::geom_vline(
+            xintercept = beta_0[i], color="red"
+            ) +
+          ggplot2::geom_vline(
+            xintercept = beta_0j_quantile, linetype="dashed"
+            ))
+}
+```
+\blue{\textbf{ANSWER (3. Bayesian Logistic Regression (d)):} \newline
+The plots above show the histograms of the posterior distributions for $\beta_{0, 10}$, $\beta_{0, 20}$,...,$\beta_{0, 60}$ with their 95\% central interval shown in dotted black lines and the actual generated $\beta_{0, 10}$, $\beta_{0, 20}$,...,$\beta_{0, 60}$ shown in solid red line. Based on these plots, the actual generated parameters are all contained within the 95\% central posterior intervals. 
+}
+
+
+We now fit our model to the actual data.
+
+(e) Fit the varying-intercept model to the real train data. Make sure to set a seed at 46 within the Stan function, to ensure that you will get the same results if you fit your model correctly. 
+
+```{r 3e, fig.width = 4, fig.height = 4, message=FALSE, warning=FALSE}
+# create list 
+stan_list3e <- list()
+stan_list3e$Y <- train$contraceptive_use
+stan_list3e$N <- nrow(train) # number of obs
+stan_list3e$J <- length(unique(train$district)) # number of district
+stan_list3e$district <- train$district
+stan_list3e$urban <- train$urban
+stan_list3e$living_children <- train$living.children
+stan_list3e$age_mean <- train$age_mean
+
+stan_list3e$N_test <- nrow(test) # number of obs
+stan_list3e$J_test <- length(unique(test$district)) # number of district
+stan_list3e$district_test <- test$district
+stan_list3e$urban_test <- test$urban
+stan_list3e$living_children_test <- test$living.children
+stan_list3e$age_mean_test <- test$age_mean
+```
+
+```{r 3e_fit_model, fig.width = 4, fig.height = 4, message=FALSE, warning=FALSE}
+# fit the model 
+options(mc.cores = parallel::detectCores())
+fit3e <- stan(model_code = stan_code3b, 
+            data = stan_list3e, 
+            iter = 2000, 
+            chains = 4, 
+            seed = 46,
+            refresh = FALSE)
+```
+
+(f) Check the convergence by examining the trace plots, 
+as you did with the simulated data. 
+
+```{r 3f_convergence, message=FALSE, warning=FALSE}
+plot(fit3e, plotfun="trace", pars='mu_0')
+plot(fit3e, plotfun="trace", pars='sigma_0')
+plot(fit3e, plotfun="trace", pars='beta_1')
+plot(fit3e, plotfun="trace", pars='beta_2')
+plot(fit3e, plotfun="trace", pars='beta_3')
+```
+
+\blue{\textbf{ANSWER (3. Bayesian Logistic Regression (f)):} \newline
+The plot above suggests that the samples for the parameters converged.
+}
+
+(g) Based on the posterior means, women belonging to which district 
+are most likely to use contraceptives? 
+Women belonging to which district are least likely to use contraceptives? 
+```{r}
+# mean of y_rep3e from 4000 iterations
+y_rep3e_mean <- colMeans(as.matrix(fit3e, pars="y_rep"))
+
+# make a data frame combining district information
+df_yrep3e <- data.frame(cbind(district = train$district, y_rep3e_mean = y_rep3e_mean))
+
+# compute mean of posterior predictive by district
+mean_yrep3e_by_district <-  df_yrep3e %>% group_by(district = factor(district)) %>% 
+  summarise(mean_pp = mean(y_rep3e_mean))
+
+# plot average posterior predictive by district
+mean_yrep3e_by_district.plot <- ggplot(data=mean_yrep3e_by_district, aes(x=district, y=mean_pp)) + 
+  geom_bar(stat="identity") + ggtitle("Probabiliy of women using contraceptives by District")
+
+mean_yrep3e_by_district.plot
+
+# get the district with maximum and minimum average probability
+max_prob_district = mean_yrep3e_by_district$district[mean_yrep3e_by_district$mean_pp ==
+                                                       max(mean_yrep3e_by_district$mean_pp)]
+print(paste0("most likely district: ", max_prob_district))
+min_prob_district = mean_yrep3e_by_district$district[mean_yrep3e_by_district$mean_pp ==
+                                                       min(mean_yrep3e_by_district$mean_pp)]
+min_prob_district
+print(paste0("least likely district: ", min_prob_district))
+```
+\blue{\textbf{ANSWER (3. Bayesian Logistic Regression (g)):} \newline
+Based on the R code and plot above, women belonging to `r max_prob_district` are \underline{most likely} to use contraceptives while women belonging to `r min_prob_district` are \underline{least likely} to use contraceptives. 
+}
+
+
+(h) What are the posterior means of $\mu_{\beta_0}$ and 
+$\sigma_{\beta_0}$? 
+Do these values offer any evidence in support of or against the 
+varying-intercept model? 
+```{r posterior-means-mu0-sigma0-real-data}
+beta_0_summary <- summary(fit3e, pars=c("mu_0", "sigma_0"), probs=c(0.05, 0.95))$summary
+mu_beta_0_mean = beta_0_summary[, "mean"][1]
+sigma_beta_0_mean = beta_0_summary[, "mean"][2]
+
+print(paste0('posterior mean of mu_beta_0 is: ', mu_beta_0_mean))
+print(paste0('posterior mean of sigma_beta_0 is: ', sigma_beta_0_mean))
+
+mu_beta_0_draws_real <- as.matrix(fit3e, pars = "mu_0")
+sigma_beta_0_draws_real <- as.matrix(fit3e, pars = "sigma_0")
+
+```
+\blue{\textbf{ANSWER (3. Bayesian Logistic Regression (h)):} \newline
+The posterior mean of $\mu_{\beta0}$ = `r mu_beta_0_mean`. The posterior mean of $\sigma_{\beta0}$ = `r sigma_beta_0_mean`. Therefore, the 95\% confidence interval of $\beta_0$ is $\mu_{\beta0} \pm 2 * \sigma_{\beta0}$ = (`r mu_beta_0_mean + 2*sigma_beta_0_mean`, `r mu_beta_0_mean - 2*sigma_beta_0_mean`). Since the 95\% confidence interval does not capture 0, we have enough evidence \underline{in support of} the varying-intercept model. 
+}
+
+
+
+## 4. Varying-Coefficients Model
+In the next model 
+we will fit to the contraceptives data is a varying-coefficients logistic 
+regression model, where the coefficient on living-children 
+varies by district: 
+
+Prior distribution:
+
+
+$\beta_{0j} \sim N(\mu_0,\sigma_0)$, 
+  with $\mu_0\sim N(0,100)$ and $\sigma_0 \sim \mbox{Exponential}(0.1)$
+
+$\beta_{1j} \sim N(0,\sigma_1)$, 
+  with $\sigma_1 \sim \mbox{Exponential}(0.1)$
+
+$\beta_{2j} \sim N(0,\sigma_2)$, 
+  with $\sigma_2 \sim \mbox{Exponential}(0.1)$
+
+$\beta_{3j} \sim N(0,\sigma_3)$, 
+  with $\sigma_3 \sim \mbox{Exponential}(0.1)$
+
+Model for data:
+
+$Y_{ij} \sim \mbox{Bernoulli}(p_{ij})$ 
+
+$\mbox{logit}\; p_{ij} = 
+\beta_{0j} + \beta_{1j}\mbox{urban} + \beta_{2j}\mbox{age-mean} + \beta_{3j}\mbox{living-children}$
+
+where $i=1,\ldots,N$ and $j=1,\ldots,J$ 
+($N$ is the number of observations in the data, 
+and $J$ is the number of districts). 
+
+(a) Fit the model to the real data.
+For each of the three coefficients to the predictors, 
+plot vertical segments corresponding to the 95\% central posterior
+intervals for the coefficient within each district.
+Thus you should have 54 parallel segments on each graph.
+If the segments are overlapping on the vertical scale, then 
+the model fit suggests that the coefficient does not differ by
+district.
+What do you conclude from these graphs?
+
+```{r stan_code4a, fig.width = 4, fig.height = 4, message=FALSE}
+# stan code for problem 4
+stan_code4a <- c("
+data {
+  // Number of observations
+  int N;
+  // Number of districts
+  int J;
+  // List of features, one for each observation
+  int district[N];
+  int<lower=0, upper=1> urban[N];
+  int living_children[N];
+  real age_mean[N];
+  // Binary response (integer array)
+  int<lower=0, upper=1> Y[N];
+  
+  int N_test;
+  // Number of districts
+  int J_test;
+  // List of features, one for each observation
+  int district_test[N_test];
+  int<lower=0, upper=1> urban_test[N_test];
+  int living_children_test[N_test];
+  real age_mean_test[N_test];
+}
+
+parameters {
+  real mu_0;
+  real<lower=0> sigma_0;
+  real beta_0j[J];  // bias term vary by J districts
+  real beta_1j[J];
+  real<lower=0> sigma_1;
+  real beta_2j[J];
+  real<lower=0> sigma_2;
+  real beta_3j[J]; // living children vary by J districts
+  real<lower=0> sigma_3;
+}
+
+model {
+  // Prior
+  mu_0 ~ normal(0,100);
+  sigma_0 ~ exponential(0.1);
+  sigma_1 ~ exponential(0.1);
+  sigma_2 ~ exponential(0.1);
+  sigma_3 ~ exponential(0.1);
+  
+  // J different beta_0j priors
+  for (j in 1:J) {
+    beta_0j[j] ~ normal(mu_0, sigma_0);
+    beta_1j[j] ~ normal(0,sigma_1);
+    beta_2j[j] ~ normal(0,sigma_2);
+    beta_3j[j] ~ normal(0,sigma_3);
+  }
+  
+  // Likelihood
+  for (n in 1:N) {
+  Y[n] ~ bernoulli_logit(beta_0j[district[n]] + beta_1j[district[n]]*urban[n] +
+            beta_2j[district[n]]*age_mean[n] + beta_3j[district[n]]*living_children[n]);
+  }
+}
+
+generated quantities {
+  int y_rep[N_test];         // Draws from posterior predictive dist
+
+  for (n in 1:N_test) {
+    y_rep[n] = bernoulli_rng(inv_logit(beta_0j[district_test[n]] + 
+              beta_1j[district_test[n]]*urban_test[n] +        
+              beta_2j[district_test[n]]*age_mean_test[n] + 
+              beta_3j[district_test[n]]*living_children_test[n]));
+  }
+}
+
+
+")
+```
+
+```{r 4_fit_model, fig.width = 4, fig.height = 4, message=FALSE, warning=FALSE}
+# fit the model 
+options(mc.cores = parallel::detectCores())
+fit4a <- stan(model_code = stan_code4a, 
+            data = stan_list3e, 
+            iter = 2000, 
+            chains = 4, 
+            seed = 46,
+            refresh = FALSE)
+```
+
+```{r p4_plot_coefs, message=FALSE, warning=FALSE}
+fit_posterior <- as.array(fit4a)
+beta_0s <- sprintf("beta_0j[%d]", 1:60)
+beta_1s <- sprintf("beta_1j[%d]", 1:60)
+beta_2s <- sprintf("beta_2j[%d]", 1:60)
+beta_3s <- sprintf("beta_3j[%d]", 1:60)
+
+mcmc_intervals(fit_posterior, pars=beta_0s, prob_outer=0.95) +
+  ggplot2::labs(
+    title = "Posterior distributions of intercept",
+    subtitle = "with 95% intervals"
+  )
+
+mcmc_intervals(fit_posterior, pars=beta_1s, prob_outer=0.95) +
+  ggplot2::labs(
+    title = "Posterior distributions of coef for urban",
+    subtitle = "with 95% intervals"
+  )
+
+mcmc_intervals(fit_posterior, pars=beta_2s, prob_outer=0.95) +
+  ggplot2::labs(
+    title = "Posterior distributions of coef for age_mean",
+    subtitle = "with 95% intervals"
+  )
+
+mcmc_intervals(fit_posterior, pars=beta_3s, prob_outer=0.95) +
+  ggplot2::labs(
+    title = "Posterior distributions of coef for living_childrean",
+    subtitle = "with 95% intervals"
+  )
+
+```
+\blue{\textbf{ANSWER (4. Varying-Coefficients Model (a)):} \newline
+Based on the 95\% central posterior intervals for the coefficients within each district, coefficients for `urban` shows greater variation amongst the districts compared to those for `age\_mean` and `living.children`. It suggests that the coefficients for `urban` vary by district while those for `age\_mean` and `living.children` do not.
+}
+
+(b) Use all of the information you've gleaned thus far to build a final Bayesian logistic regression classifier on the train set. Then, use your model to make predictions on the test set. Report your model's classification percentage. 
+```{r stan_code4b, fig.width = 4, fig.height = 4, message=FALSE}
+# stan code for problem 4
+stan_code4b <- c("
+data {
+  // Number of observations
+  int N;
+  // Number of districts
+  int J;
+  // List of features, one for each observation
+  int district[N];
+  int<lower=0, upper=1> urban[N];
+  int living_children[N];
+  real age_mean[N];
+  // Binary response (integer array)
+  int<lower=0, upper=1> Y[N];
+  
+  int N_test;
+  // Number of districts
+  int J_test;
+  // List of features, one for each observation
+  int district_test[N_test];
+  int<lower=0, upper=1> urban_test[N_test];
+  int living_children_test[N_test];
+  real age_mean_test[N_test];
+}
+
+parameters {
+  real mu_0;
+  real<lower=0> sigma_0;
+  real beta_0j[J];  // bias term vary by J districts
+  real beta_1j[J];
+  real<lower=0> sigma_1;
+  real beta_2;
+  real beta_3;
+}
+
+model {
+  // Prior
+  mu_0 ~ normal(0,100);
+  sigma_0 ~ exponential(0.1);
+  sigma_1 ~ exponential(0.1);
+  beta_2 ~ normal(0, 100);
+  beta_3 ~ normal(0, 100);
+  
+  // J different beta_0j, beta_1j priors
+  for (j in 1:J) {
+    beta_0j[j] ~ normal(mu_0, sigma_0);
+    beta_1j[j] ~ normal(0,sigma_1);
+  }
+  
+  // Likelihood
+  for (n in 1:N) {
+  Y[n] ~ bernoulli_logit(beta_0j[district[n]] + 
+              beta_1j[district[n]]*urban[n] + beta_2*age_mean[n] + 
+              beta_3*living_children[n]);
+  }
+}
+
+generated quantities {
+  int y_rep[N_test];         // Draws from posterior predictive dist
+
+  for (n in 1:N_test) {
+    y_rep[n] = bernoulli_rng(inv_logit(beta_0j[district_test[n]] +
+              beta_1j[district_test[n]]*urban_test[n] +        
+              beta_2*age_mean_test[n] + beta_3*living_children_test[n]));
+  }
+}
+
+
+")
+
+```
+
+```{r 4b_fit_model, fig.width = 4, fig.height = 4, message=FALSE, warning=FALSE}
+# fit the model 
+options(mc.cores = parallel::detectCores())
+fit4b <- stan(model_code = stan_code4b, 
+            data = stan_list3e, 
+            iter = 2000, 
+            chains = 4, 
+            seed = 46,
+            refresh = FALSE)
+```
+ 
+
+```{r}
+y_rep4b_mean <- colMeans(as.matrix(fit4b, pars="y_rep"))
+y_pred4b <- y_rep4b_mean >= 0.5
+y_true <- test$contraceptive_use
+accuracy4b <- sum(y_pred4b == y_true)/length(y_true)
+accuracy4b # CHECK >= 0.5 (0.6897622) OR > 0.5 (0.688728)
+```
+\blue{\textbf{ANSWER (4. Varying-Coefficients Model (b)):} \newline
+Since the 95\% central posterior intervals for the intercept and coefficients vary more by district than the coefficients for `age\_mean` and `living.children`, we would vary coefficients for intercept and `urban` by district. This model gives an accuracy score of `r accuracy4b` on test data.
+}
+
+## 5. "Bayesball" (AC 209b students only)
+In Major League Baseball (MLB), each team plays 162 games in 
+the regular season. 
+The data in \verb+Bayesball.txt+ contains information about
+every regular season game in 2017.
+The data can be read in by the command
+```
+games2017 = read.table("Bayesball.txt", sep=',')
+```
+The relevant columns of the data are
+```
+data2017 = games2017[,c(7,4,11,10)]
+names(data_2017) = c("Home","Away","Home_Score","Away_Score")
+```
+Because we are going to focus on wins versus losses, you will
+need to convert these data into binary outcomes.
+
+Under the Bradley-Terry model, each team $i$ 
+is assumed to have some underlying talent parameter $\pi_i$. 
+The model states that the probability that team $i$ defeats 
+opponent $j$ in any game is: 
+\[
+\Pr(\mbox{team $i$ defeats team $j$}) = \frac{\pi_i}{\pi_i + \pi_j}.
+\]
+where $i, j \in (1, 2, ... 30)$, since there are 30 teams in MLB. 
+The parameter $\pi_i$ is team $i$'s ``strength'' parameter, and
+is required to be positive.
+
+If we let $V_{ij}$ be the number of times in a season that team $i$ defeats team $j$, and $n_{ij}$ to be the number of games between them, an entire season of MLB can be described with the following density: 
+\[
+p(V \mid \pi) = \prod_{i=1}^{N-1} \prod_{j=i+1}^{N} \binom{n_{ij}}{V_{ij}} (\frac{\pi_i}{\pi_i + \pi_j})^{V_{ij}} (\frac{\pi_j}{\pi_i + \pi_j})^{V_{ji}}
+\]
+Team $i$'s victories against team $j$ follows a binomial distribution 
+governed by the Bradley-Terry probability with the given strength parameters. 
+
+Rather than work with the $\pi_i$, we will transform the model by
+letting $\lambda_i = \log \pi_i$ for all $i$.
+Thus the probability $i$ defeats $j$ is
+\[
+\Pr(\mbox{team $i$ defeats team $j$}) = 
+\frac{\exp(\lambda_i)}{\exp(\lambda_i) + \exp(\lambda_j)}.
+\]
+The advantage of this parameterization is that the $\lambda_i$ 
+are unconstrained real-valued parameters.
+
+We now carry out a Bayesian analysis of the Bradley-Terry model.
+We will assume a hierarchical normal prior distribution on the
+$\lambda_i$, that is
+\[
+\lambda_i \sim N(0, \sigma).
+\]
+for all $i=1,\ldots,N$.
+We will also assume that the standard deviation $\sigma$ has
+a uniform prior distribution,
+\[
+\sigma \sim \mbox{Uniform}(0,50)
+\]
+with a maximum value of 50.
+
+Thus the full model is: 
+
+Prior distribution:
+
+ 
+$\lambda_i \mid \sigma \sim N(0, \sigma)$, with
+$\sigma \sim \mbox{Uniform}(0,50)$
+
+Model for data:
+$V_{ij} \mid \lambda_i, \lambda_j, n_{ij} \sim 
+\mbox{Binomial}\left(n_{ij}, \frac{\exp(\lambda_i)}{\exp(\lambda_i)+\exp(\lambda_j)} \right)$
+
+```{r data_p5}
+games2017 = read.table("data/Bayesball.txt", sep=',')
+data2017 = games2017[,c(7,4,11,10)]
+names(data2017) = c("Home","Away","Home_Score","Away_Score")
+head(data2017)
+```
+
+(a) Why does this prior distribution on the $\lambda_i$
+and $\sigma$ make sense? Briefly explain. 
+
+\blue{\textbf{ANSWER (5. Bayesball (a)):} \newline
+The prior on  $\lambda_i \sim N(0, \sigma)$ makes sense because it reflects an expected wining probability between 2 teams to be 
+\[
+E[\Pr(\mbox{team $i$ defeats team $j$})] = 
+\frac{\exp(0)}{\exp(0) + \exp(0)} = \frac{1}{2}.
+\]
+The prior on $\sigma \sim \mbox{Uniform}(0,50)$ makes sense because it gives the standard deviation of the log scale team strength a reasonable limited range with equal probability spreading over.
+}
+
+(b) Implement the model in Stan. 
+
+```{r p5-data-to-binomial-count}
+n_teams <- length(unique(data2017$Home))
+N_ij <- matrix(rep(0, n_teams*n_teams), ncol = n_teams)
+V_ij <- matrix(rep(0, n_teams*n_teams), ncol = n_teams)
+for (i in 1:length(levels(data2017$Home))) {
+  home <- levels(data2017$Home)[i]
+  for (j in 1:length(levels(data2017$Away))) {
+    away <- levels(data2017$Away)[j]
+    if (away != home) {
+      df1_ij <- data2017[data2017$Home == home & data2017$Away == away, ]
+      df2_ij <- data2017[data2017$Home == away & data2017$Away == home, ]
+      N_ij[i, j] <- nrow(df1_ij) + nrow(df2_ij)
+      v1 <- nrow(df1_ij[df1_ij$Home_Score > df1_ij$Away_Score, ])
+      v2 <- nrow(df2_ij[df2_ij$Home_Score < df2_ij$Away_Score, ])
+      V_ij[i, j] <- v1 + v2
+    }
+    else {
+      N_ij[i, j] <- 0
+      V_ij[i, j] <- 0
+    }
+  }
+}
+```
+
+```{r mlb-model}
+# create list 
+stan_list_mlb <- list()
+stan_list_mlb$n_team <- n_teams
+stan_list_mlb$N <- N_ij
+stan_list_mlb$V <- V_ij
+
+# stan code 
+stan_code_mlb <- c("data {
+  int n_team; // Number of teams
+  int N[n_team, n_team];
+  int V[n_team, n_team]; // Bernoulli Response: {0, 1} array
+}
+
+parameters {
+  real<lower=0> sigma;
+  real lambda[n_team];
+}
+
+model {
+  // Prior
+  sigma ~ uniform(0, 50);
+  for (t in 1:n_team) {
+    lambda[t] ~ normal(0, sigma);
+  }
+  
+  // Likelihood
+  for (i in 1:n_team) {
+    for (j in 1:n_team) {
+      V[i, j] ~ binomial(N[i, j], exp(lambda[i])/(exp(lambda[i]) + exp(lambda[j])));
+    }
+  }
+}
+
+generated quantities {
+  int V_rep[n_team, n_team];         // Draws from posterior predictive dist
+  for (i in 1:n_team) {
+    for (j in 1:n_team) {
+      V_rep[i, j] = binomial_rng(N[i, j], exp(lambda[i])/(exp(lambda[i]) + exp(lambda[j])));
+    }
+  }
+}
+
+")
+```
+
+```{r fit-mlb-model, warning=FALSE, message=FALSE}
+options(mc.cores = parallel::detectCores())
+mlb_fit <- stan(model_code = stan_code_mlb, 
+            data = stan_list_mlb, 
+            iter = 2000, 
+            chains = 4,
+            seed = 46,
+            refresh = FALSE)
+```
+
+(c) Report the posterior means for each team's exponentiated strength parameters (that is, exp($\lambda_i$)).
+
+```{r mean-team-strength}
+mlb_pi <- exp(as.matrix(mlb_fit, pars = "lambda"))
+mean_team_strength <- colMeans(mlb_pi)
+names(mean_team_strength) <- levels(data2017$Home)
+print(sort(mean_team_strength))
+```
+
+(d) Using the posterior predictive distribution for the strengths
+of the Dodgers and Astros, simulate 1000 recreations of the 2017 World Series. 
+That is, simulate 1000 separate series between the teams, where the series 
+ends when either team gets to 4 wins. 
+Based on your simulation, what was the probability that the 
+Astros would have won the World Series last year? 
+
+```{r p5-dodgers-astros}
+dodgers_strength <- mean_team_strength[levels(data2017$Home) == 'LAN']
+astros_strength <- mean_team_strength[levels(data2017$Home) == 'HOU']
+total_dodgers_win <- 0
+total_astros_win <- 0
+for (i in 1:1000) {
+  dodgers_win <- 0
+  astros_win <- 0
+  while (dodgers_win < 4 & astros_win < 4) {
+    dodgers <- rbinom(n=1, size=1, dodgers_strength/(dodgers_strength+astros_strength))
+    if (dodgers == 1) {
+      dodgers_win <- dodgers_win + 1
+    }
+    else {
+      astros_win <- astros_win + 1
+    }
+  }
+  if (dodgers_win > astros_win) {
+    total_dodgers_win <- total_dodgers_win + 1
+  }
+  else {
+    total_astros_win <- total_astros_win + 1
+  }
+}
+
+print(paste0('Based on 1000 simulations, the probability that the Astros would have won the 2017 World Series is ', total_astros_win/10, ' %'))
+```
+
